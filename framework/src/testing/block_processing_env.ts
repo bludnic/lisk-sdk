@@ -14,11 +14,11 @@
  *
  */
 
-import { Block, Chain, DataAccess, BlockHeader, Transaction } from '@liskhq/lisk-chain';
+import { Block, Chain, DataAccess, BlockHeader, Transaction, StateStore } from '@liskhq/lisk-chain';
 import { getNetworkIdentifier, getKeys } from '@liskhq/lisk-cryptography';
 import { InMemoryKVStore, KVStore } from '@liskhq/lisk-db';
 import { objects } from '@liskhq/lisk-utils';
-
+import { codec } from '@liskhq/lisk-codec';
 import { BaseModule } from '../modules';
 import { InMemoryChannel } from '../controller';
 import { loggerMock, channelMock } from './mocks';
@@ -29,9 +29,18 @@ import { Consensus } from '../node/consensus';
 import { APIContext } from '../node/state_machine';
 import { Node } from '../node';
 import { createNewAPIContext } from '../node/state_machine/api_context';
+import { blockAssetsJSON } from './fixtures/genesis-asset';
+import { ValidatorsAPI } from '../modules/validators';
+import { BFTAPI } from '../modules/bft';
+import { TokenModule } from '../modules/token';
+import { AuthModule } from '../modules/auth';
+import { FeeModule } from '../modules/fee';
+import { RewardModule } from '../modules/reward';
+import { RandomModule } from '../modules/random';
+import { DPoSModule } from '../modules/dpos_v2';
 
 type Options = {
-	genesisConfig?: GenesisConfig;
+	genesis?: GenesisConfig;
 	databasePath?: string;
 	passphrase?: string;
 };
@@ -46,6 +55,8 @@ export interface BlockProcessingEnv {
 	createBlock: (transactions?: Transaction[], timestamp?: number) => Promise<Block>;
 	getConsensus: () => Consensus;
 	getChain: () => Chain;
+	getValidatorAPI: () => ValidatorsAPI;
+	getBFTAPI: () => BFTAPI;
 	getBlockchainDB: () => KVStore;
 	process: (block: Block) => Promise<void>;
 	processUntilHeight: (height: number) => Promise<void>;
@@ -53,6 +64,7 @@ export interface BlockProcessingEnv {
 	getNextValidatorPassphrase: (blockHeader: BlockHeader) => Promise<string>;
 	getDataAccess: () => DataAccess;
 	getNetworkId: () => Buffer;
+	invoke: <T = void>(path: string, params?: Record<string, unknown>) => Promise<T>;
 	cleanup: (config: Options) => Promise<void>;
 }
 
@@ -61,8 +73,8 @@ const getAppConfig = (genesisConfig?: GenesisConfig): ApplicationConfig => {
 		{},
 		{
 			...defaultConfig,
-			genesisConfig: {
-				...defaultConfig.genesisConfig,
+			genesis: {
+				...defaultConfig.genesis,
 				...(genesisConfig ?? {}),
 			},
 		},
@@ -108,7 +120,7 @@ const createProcessableBlock = async (
 export const getBlockProcessingEnv = async (
 	params: BlockProcessingParams,
 ): Promise<BlockProcessingEnv> => {
-	const appConfig = getAppConfig(params.options?.genesisConfig);
+	const appConfig = getAppConfig(params.options?.genesis);
 
 	removeDB(params.options?.databasePath);
 	const blockchainDB = createDB('blockchain', params.options?.databasePath);
@@ -116,8 +128,31 @@ export const getBlockProcessingEnv = async (
 	const node = new Node({
 		options: appConfig,
 	});
+	const authModule = new AuthModule();
+	const tokenModule = new TokenModule();
+	const feeModule = new FeeModule();
+	const rewardModule = new RewardModule();
+	const randomModule = new RandomModule();
+	const dposModule = new DPoSModule();
+
+	// resolve dependencies
+	feeModule.addDependencies(tokenModule.api);
+	rewardModule.addDependencies(tokenModule.api, randomModule.api, node.bftAPI);
+	dposModule.addDependencies(randomModule.api, node.bftAPI, node.validatorAPI, tokenModule.api);
+
+	// register modules
+	node.registerModule(authModule);
+	node.registerModule(tokenModule);
+	node.registerModule(feeModule);
+	node.registerModule(rewardModule);
+	node.registerModule(randomModule);
+	node.registerModule(dposModule);
+	const blockAssets = blockAssetsJSON.map(asset => ({
+		...asset,
+		data: codec.fromJSON<Record<string, unknown>>(asset.schema, asset.data),
+	}));
 	const genesisBlock = await node.generateGenesisBlock({
-		assets: [],
+		assets: blockAssets,
 	});
 	await node.init({
 		blockchainDB,
@@ -138,6 +173,8 @@ export const getBlockProcessingEnv = async (
 			createProcessableBlock(node, transactions, timestamp),
 		getChain: () => node['_chain'],
 		getConsensus: () => node['_consensus'],
+		getValidatorAPI: () => node['_validatorsModule'].api,
+		getBFTAPI: () => node['_bftModule'].api,
 		getBlockchainDB: () => blockchainDB,
 		process: async (block): Promise<void> => node['_consensus'].execute(block),
 		processUntilHeight: async (height): Promise<void> => {
@@ -154,6 +191,27 @@ export const getBlockProcessingEnv = async (
 			const passphrase = getPassphraseFromDefaultConfig(validator);
 
 			return passphrase;
+		},
+		invoke: async <T = void>(path: string, input: Record<string, unknown> = {}): Promise<T> => {
+			const [mod, method] = path.split('_');
+			const endpoints = node.getModuleEndpoints();
+			const endpoint = endpoints[mod];
+			if (endpoint === undefined) {
+				throw new Error(`Invalid endpoint ${mod} to invoke`);
+			}
+			const handler = endpoint[method];
+			if (handler === undefined) {
+				throw new Error(`Invalid endpoint ${method} is not registered for ${mod}`);
+			}
+			const stateStore = new StateStore(node['_blockchainDB']);
+			const result = await handler({
+				getStore: (moduleID: number, storePrefix: number) =>
+					stateStore.getStore(moduleID, storePrefix),
+				logger: node['_logger'],
+				networkIdentifier: node['_chain'].networkIdentifier,
+				params: input,
+			});
+			return result as T;
 		},
 		getNetworkId: () => networkIdentifier,
 		getDataAccess: () => node['_chain'].dataAccess,

@@ -475,7 +475,10 @@ export class Consensus {
 		// Verify validatorsHash
 		await this._verifyValidatorsHash(apiContext, block);
 		// Verify stateRoot
-		const currentState = await this._prepareFinalizingState(stateStore);
+		const currentState = await this._prepareFinalizingState(
+			stateStore,
+			this._chain.lastBlock.header.stateRoot,
+		);
 		this._verifyStateRoot(block, currentState.smt.rootHash);
 
 		await this._chain.saveBlock(block, currentState, finalizedHeight, {
@@ -680,20 +683,25 @@ export class Consensus {
 
 		// Offset must be set to 1, because lastBlock is still this deleting block
 		const stateStore = new StateStore(this._db);
-		const currentState = await this._prepareFinalizingState(stateStore, false);
+		const currentState = await this._prepareFinalizingState(
+			stateStore,
+			this._chain.lastBlock.header.stateRoot,
+			false,
+		);
 		await this._chain.removeBlock(block, currentState, { saveTempBlock });
 		this.events.emit(CONSENSUS_EVENT_BLOCK_DELETE, block);
 	}
 
 	private async _prepareFinalizingState(
 		stateStore: StateStore,
+		stateRoot?: Buffer,
 		finalize = true,
 	): Promise<CurrentState> {
 		const batch = this._db.batch();
 		const smtStore = new SMTStore(this._db);
 		const smt = new SparseMerkleTree({
 			db: smtStore,
-			rootHash: this._chain.lastBlock.header.stateRoot,
+			rootHash: stateRoot,
 		});
 
 		// On save, use finalize flag to finalize stores
