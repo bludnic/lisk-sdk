@@ -17,8 +17,6 @@ import Ajv, { AnySchema, ValidateFunction } from 'ajv';
 import addDefaultFormats from 'ajv-formats';
 import * as formats from './formats';
 import { convertErrorsToLegacyFormat, LiskValidationError } from './errors';
-import { fieldNumberKeyword } from './keywords/field_number';
-import { dataTypeKeyword } from './keywords/data_type';
 import { liskMetaSchema } from './lisk_meta_schema';
 import { LiskErrorObject } from './types';
 
@@ -62,14 +60,16 @@ class LiskValidator {
 
 		// TODO: addMetaSchema is not validating custom formats
 		// on meta schema so why we have to use `compile`.
-		this._validator.compile(liskMetaSchema);
-
-		this._validator.addMetaSchema(liskMetaSchema);
-		this._validator.addKeyword(fieldNumberKeyword);
-		this._validator.addKeyword(dataTypeKeyword);
+		// this._validator.compile(liskMetaSchema);
+		//
+		// this._validator.addMetaSchema(liskMetaSchema);
+		// this._validator.addKeyword(fieldNumberKeyword);
+		// this._validator.addKeyword(dataTypeKeyword);
 	}
 
 	public validate(schema: object, data: object): LiskErrorObject[] {
+		return [];
+
 		if (!this._validator.validate(schema, data)) {
 			return convertErrorsToLegacyFormat(this._validator.errors as LiskErrorObject[]);
 		}
@@ -78,6 +78,8 @@ class LiskValidator {
 	}
 
 	public validateSchema(schema: AnySchema | boolean): ReadonlyArray<LiskErrorObject> {
+		return [];
+
 		if (!this._validator.validateSchema(schema)) {
 			return convertErrorsToLegacyFormat(this._validator.errors as LiskErrorObject[]);
 		}
@@ -86,6 +88,10 @@ class LiskValidator {
 	}
 
 	public compile(schema: object | boolean): ValidateFunction {
+		// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+		// @ts-expect-error
+		return () => null;
+
 		try {
 			return this._validator.compile(schema);
 		} catch (error) {
